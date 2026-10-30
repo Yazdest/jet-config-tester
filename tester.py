@@ -1,538 +1,183 @@
-import json
-import time
-import socket
-import subprocess
+import json, os, re, socket, subprocess, tempfile, time
+from functools import lru_cache
+from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs
 import requests
-import os
 
-from urllib.parse import urlparse, parse_qs
-
-
-# ==============================
-# Main settings
-# ==============================
-
-SOURCE_URL = "https://sub.vlessfo.ru/vlessforu/working_configs.txt"
-
+SOURCE_URLS = ["https://sub.vlessfo.ru/vlessforu/working_configs.txt"]
 XRAY = "./bin/xray"
-
-SOCKS_HOST = "127.0.0.1"
-SOCKS_PORT = 10808
-
-MIN_SPEED_MBPS = 5.0
-MAX_LATENCY_MS = 300.0
-
+XRAY_VERSION = "26.2.6"
+SOCKS_HOST, SOCKS_PORT = "127.0.0.1", 10808
+MIN_SPEED_MBPS, MAX_LATENCY_MS = 5.0, 300.0
 LATENCY_URL = "https://www.gstatic.com/generate_204"
+IP_CHECK_URL = "https://api.ipify.org"
 SPEED_URL = "https://speed.cloudflare.com/__down?bytes=5000000"
-
-LATENCY_TIMEOUT = 15
-SPEED_TIMEOUT = 30
-
 RESULT_FILE = "passed_configs.json"
+CHANNEL_LABEL = "تلگرام: @IRJetConfig"
+SUPPORTED = {"raw", "tcp", "ws", "websocket", "grpc", "xhttp", "splithttp", "httpupgrade"}
+FLAGS = {"DE":"🇩🇪","NL":"🇳🇱","FI":"🇫🇮","FR":"🇫🇷","GB":"🇬🇧","US":"🇺🇸","CA":"🇨🇦","CH":"🇨🇭","SE":"🇸🇪","NO":"🇳🇴","AT":"🇦🇹","PL":"🇵🇱","TR":"🇹🇷","RU":"🇷🇺","UA":"🇺🇦","RO":"🇷🇴","BG":"🇧🇬","CZ":"🇨🇿","JP":"🇯🇵","SG":"🇸🇬","HK":"🇭🇰","KR":"🇰🇷","IN":"🇮🇳","BR":"🇧🇷","AU":"🇦🇺","ES":"🇪🇸","IT":"🇮🇹","BE":"🇧🇪","IE":"🇮🇪","AE":"🇦🇪","IL":"🇮🇱"}
+NAMES = {"DE":"Germany","NL":"Netherlands","FI":"Finland","FR":"France","GB":"United Kingdom","US":"United States","CA":"Canada","CH":"Switzerland","SE":"Sweden","NO":"Norway","AT":"Austria","PL":"Poland","TR":"Türkiye","RU":"Russia","UA":"Ukraine","RO":"Romania","BG":"Bulgaria","CZ":"Czechia","JP":"Japan","SG":"Singapore","HK":"Hong Kong","KR":"South Korea","IN":"India","BR":"Brazil","AU":"Australia","ES":"Spain","IT":"Italy","BE":"Belgium","IE":"Ireland","AE":"UAE","IL":"Israel"}
 
-SUPPORTED_NETWORKS = {
-    "raw",
-    "tcp",
-    "ws",
-    "websocket",
-    "grpc",
-    "xhttp",
-    "splithttp",
-    "httpupgrade"
-}
-
-
-# ==============================
-# Helper functions
-# ==============================
-
-def first(params, *keys, default=""):
-    for key in keys:
-        values = params.get(key)
-        if values:
-            return values[0]
+def first(p, *keys, default=""):
+    for k in keys:
+        v = p.get(k)
+        if v and v[0] != "": return v[0]
     return default
 
-
-def download_configs():
-    response = requests.get(
-        SOURCE_URL,
-        timeout=30,
-        headers={"User-Agent": "JetConfigTester/1.0"}
-    )
-
-    response.raise_for_status()
-
-    configs = []
-
-    for line in response.text.splitlines():
-        line = line.strip()
-
-        if line.startswith(("vless://", "trojan://")):
-            configs.append(line)
-
-    return list(dict.fromkeys(configs))
-
-
-# ==============================
-# Parse VLESS / Trojan
-# ==============================
-
 def parse_config(uri):
-
-    parsed = urlparse(uri)
-    params = parse_qs(parsed.query, keep_blank_values=True)
-
-    protocol = parsed.scheme.lower()
-
-    if protocol not in ("vless", "trojan"):
-        raise ValueError("Unsupported protocol")
-
-    if not parsed.hostname or not parsed.port:
-        raise ValueError("Missing server address or port")
-
-    host = parsed.hostname
-    port = parsed.port
-    username = parsed.username or ""
-
-    network = first(
-        params,
-        "type",
-        "network",
-        default="raw"
-    ).lower()
-
-    security = first(
-        params,
-        "security",
-        default="none"
-    ).lower()
-
-    if network not in SUPPORTED_NETWORKS:
-        raise ValueError("Unsupported network: " + network)
-
-    if security not in ("tls", "reality", "none"):
-        raise ValueError("Unsupported security: " + security)
-
-    stream = {
-        "network": network,
-        "security": security
-    }
-
-    # --------------------------
-    # RAW / TCP
-    # --------------------------
-
-    if network in ("raw", "tcp"):
-
-        header_type = first(params, "headerType", default="none")
-
-        if header_type == "http":
-            stream["rawSettings"] = {
-                "header": {
-                    "type": "http",
-                    "request": {
-                        "path": [first(params, "path", default="/")],
-                        "headers": {
-                            "Host": [
-                                first(params, "host", default=host)
-                            ]
-                        }
-                    }
-                }
-            }
-
-    # --------------------------
-    # WebSocket
-    # --------------------------
-
-    elif network in ("ws", "websocket"):
-
-        stream["wsSettings"] = {
-            "path": first(params, "path", default="/"),
-            "headers": {
-                "Host": first(params, "host", default=host)
-            }
-        }
-
-    # --------------------------
-    # gRPC
-    # --------------------------
-
-    elif network == "grpc":
-
-        stream["grpcSettings"] = {
-            "serviceName": first(
-                params,
-                "serviceName",
-                "service_name",
-                default=""
-            ),
-            "multiMode": first(
-                params,
-                "mode",
-                default="gun"
-            ) == "multi"
-        }
-
-    # --------------------------
-    # XHTTP
-    # --------------------------
-
-    elif network in ("xhttp", "splithttp"):
-
-        stream["xhttpSettings"] = {
-            "path": first(params, "path", default="/"),
-            "host": first(params, "host", default=""),
-            "mode": first(params, "mode", default="auto")
-        }
-
-    # --------------------------
-    # HTTP Upgrade
-    # --------------------------
-
-    elif network == "httpupgrade":
-
-        stream["httpupgradeSettings"] = {
-            "path": first(params, "path", default="/"),
-            "host": first(params, "host", default=host)
-        }
-
-    # ==========================
-    # TLS settings
-    # ==========================
-
+    u = urlsplit(uri); p = parse_qs(u.query, keep_blank_values=True)
+    protocol = u.scheme.lower()
+    if protocol not in ("vless", "trojan") or not u.hostname or not u.port:
+        raise ValueError("Invalid URI or unsupported protocol")
+    host, port, credential = u.hostname, u.port, unquote(u.username or "")
+    net = first(p, "type", "network", default="raw").lower()
+    if net not in SUPPORTED: raise ValueError("Unsupported transport")
+    method = {"tcp":"raw", "ws":"websocket", "splithttp":"xhttp"}.get(net, net)
+    security = first(p, "security", default="none").lower()
+    if security not in ("none", "tls", "reality"): raise ValueError("Unsupported security")
+    if security == "reality" and method not in ("raw", "xhttp", "grpc"):
+        raise ValueError("REALITY cannot be combined with this transport")
+    stream = {"method": method, "security": security}
+    if method == "raw":
+        raw = {}
+        if first(p, "headerType", default="none").lower() == "http":
+            raw["header"] = {"type":"http", "request":{"path":[first(p,"path",default="/")],"headers":{"Host":[first(p,"host",default=host)]}}}
+        stream["rawSettings"] = raw
+    elif method == "websocket":
+        ws = {"path":first(p,"path",default="/"),"headers":{}}
+        if first(p,"host"): ws["headers"]["Host"] = first(p,"host")
+        stream["wsSettings"] = ws
+    elif method == "grpc":
+        grpc = {"serviceName":first(p,"serviceName","service_name"),"multiMode":first(p,"mode",default="gun").lower()=="multi"}
+        if first(p,"authority"): grpc["authority"] = first(p,"authority")
+        stream["grpcSettings"] = grpc
+    elif method == "xhttp":
+        xhttp = {"path":first(p,"path",default="/"),"mode":first(p,"mode",default="auto")}
+        if first(p,"host"): xhttp["host"] = first(p,"host")
+        extra = first(p,"extra")
+        if extra:
+            try:
+                parsed_extra = json.loads(extra)
+                if isinstance(parsed_extra, dict): xhttp["extra"] = parsed_extra
+            except json.JSONDecodeError: pass
+        stream["xhttpSettings"] = xhttp
+    elif method == "httpupgrade":
+        stream["httpupgradeSettings"] = {"path":first(p,"path",default="/"),"host":first(p,"host",default=host)}
     if security == "tls":
-
-        tls_settings = {
-            "serverName": first(params, "sni", "servername", default=host)
-        }
-
-        alpn = first(params, "alpn")
-
-        if alpn:
-            tls_settings["alpn"] = alpn.split(",")
-
-        fingerprint = first(params, "fp")
-
-        if fingerprint:
-            tls_settings["fingerprint"] = fingerprint
-
-        stream["tlsSettings"] = tls_settings
-
-    # ==========================
-    # REALITY settings
-    # ==========================
-
+        tls = {"serverName":first(p,"sni","servername",default=host)}
+        if first(p,"alpn"): tls["alpn"] = [x for x in first(p,"alpn").split(",") if x]
+        if first(p,"fp"): tls["fingerprint"] = first(p,"fp")
+        stream["tlsSettings"] = tls
     elif security == "reality":
-
-        public_key = first(params, "pbk", "publicKey")
-
-        if not public_key:
-            raise ValueError("Reality public key is missing")
-
-        if network not in ("raw", "tcp", "xhttp", "splithttp", "grpc"):
-            raise ValueError(
-                "REALITY does not support this network: " + network
-            )
-
-        stream["realitySettings"] = {
-            "serverName": first(
-                params,
-                "sni",
-                "servername",
-                default=host
-            ),
-            "fingerprint": first(params, "fp", default="chrome"),
-            "password": public_key,
-            "shortId": first(params, "sid"),
-            "spiderX": first(params, "spx", default="/")
-        }
-
-    # ==========================
-    # VLESS outbound
-    # ==========================
-
+        pbk = first(p,"pbk","publicKey")
+        if not pbk: raise ValueError("REALITY public key missing")
+        stream["realitySettings"] = {"serverName":first(p,"sni","servername",default=host),"fingerprint":first(p,"fp",default="chrome"),"password":pbk,"shortId":first(p,"sid"),"spiderX":first(p,"spx",default="/")}
+        if first(p,"pqv"): stream["realitySettings"]["mldsa65Verify"] = first(p,"pqv")
     if protocol == "vless":
-
-        if not username:
-            raise ValueError("VLESS UUID is missing")
-
-        user = {
-            "id": username,
-            "encryption": first(params, "encryption", default="none"),
-            "level": 0
-        }
-
-        flow = first(params, "flow")
-
-        if flow:
-            user["flow"] = flow
-
-        outbound = {
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": host,
-                    "port": port,
-                    "users": [user]
-                }]
-            },
-            "streamSettings": stream
-        }
-
-    # ==========================
-    # Trojan outbound
-    # ==========================
-
+        if not credential: raise ValueError("VLESS UUID missing")
+        user = {"id":credential,"encryption":first(p,"encryption",default="none")}
+        if first(p,"flow"): user["flow"] = first(p,"flow")
+        outbound = {"protocol":"vless","settings":{"vnext":[{"address":host,"port":port,"users":[user]}]},"streamSettings":stream}
     else:
+        if not credential: raise ValueError("Trojan password missing")
+        if security == "none": raise ValueError("Trojan without TLS/REALITY rejected")
+        outbound = {"protocol":"trojan","settings":{"servers":[{"address":host,"port":port,"password":credential}]},"streamSettings":stream}
+    return {"log":{"loglevel":"warning"},"inbounds":[{"listen":SOCKS_HOST,"port":SOCKS_PORT,"protocol":"socks","settings":{"auth":"noauth","udp":False}}],"outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]}
 
-        if not username:
-            raise ValueError("Trojan password is missing")
-
-        if security == "none":
-            raise ValueError("Trojan without TLS is not supported")
-
-        outbound = {
-            "protocol": "trojan",
-            "settings": {
-                "servers": [{
-                    "address": host,
-                    "port": port,
-                    "password": username
-                }]
-            },
-            "streamSettings": stream
-        }
-
-    # ==========================
-    # Complete Xray config
-    # ==========================
-
-    return {
-        "log": {
-            "loglevel": "warning"
-        },
-        "inbounds": [{
-            "listen": SOCKS_HOST,
-            "port": SOCKS_PORT,
-            "protocol": "socks",
-            "settings": {
-                "auth": "noauth",
-                "udp": False
-            }
-        }],
-        "outbounds": [
-            outbound,
-            {
-                "protocol": "freedom",
-                "tag": "direct"
-            }
-        ]
-    }
-
-
-# ==============================
-# Wait for Xray
-# ==============================
-
-def wait_for_xray(process):
-
-    for _ in range(40):
-
-        if process.poll() is not None:
-            return False
-
+def wait_for_xray(proc):
+    for _ in range(50):
+        if proc.poll() is not None: return False
         try:
-            with socket.create_connection(
-                (SOCKS_HOST, SOCKS_PORT),
-                timeout=1
-            ):
-                return True
-
-        except OSError:
-            time.sleep(0.25)
-
+            with socket.create_connection((SOCKS_HOST,SOCKS_PORT),timeout=1) as s:
+                s.settimeout(1); s.sendall(b"\x05\x01\x00")
+                if s.recv(2) == b"\x05\x00": return True
+        except OSError: time.sleep(.2)
     return False
 
+def proxies():
+    px = f"socks5h://{SOCKS_HOST}:{SOCKS_PORT}"
+    return {"http":px,"https":px}
 
-# ==============================
-# Latency test
-# ==============================
+def check_tunnel(px):
+    r = requests.get(IP_CHECK_URL,proxies=px,timeout=(8,15)); r.raise_for_status()
+    ip = r.text.strip()
+    if not re.fullmatch(r"[0-9a-fA-F:.]+",ip): raise ValueError("Invalid proxy IP response")
 
-def measure_latency(proxies):
+def latency(px):
+    start=time.perf_counter(); r=requests.get(LATENCY_URL,proxies=px,timeout=(8,15),headers={"Cache-Control":"no-cache"})
+    if r.status_code not in (200,204): raise ValueError("Latency endpoint rejected request")
+    return (time.perf_counter()-start)*1000
 
-    start = time.perf_counter()
-
-    response = requests.get(
-        LATENCY_URL,
-        proxies=proxies,
-        timeout=LATENCY_TIMEOUT,
-        headers={"Cache-Control": "no-cache"}
-    )
-
-    elapsed = (time.perf_counter() - start) * 1000
-
-    if response.status_code not in (200, 204):
-        raise ValueError("Latency test returned HTTP " + str(response.status_code))
-
-    return elapsed
-
-
-# ==============================
-# Speed test
-# ==============================
-
-def measure_speed(proxies):
-
-    start = time.perf_counter()
-    downloaded = 0
-
-    with requests.get(
-        SPEED_URL,
-        proxies=proxies,
-        timeout=SPEED_TIMEOUT,
-        stream=True,
-        headers={"Cache-Control": "no-cache"}
-    ) as response:
-
-        response.raise_for_status()
-
-        for chunk in response.iter_content(chunk_size=65536):
-
+def speed(px):
+    start=time.perf_counter(); total=0
+    with requests.get(SPEED_URL,proxies=px,timeout=(10,35),stream=True,headers={"Cache-Control":"no-cache"}) as r:
+        r.raise_for_status()
+        for chunk in r.iter_content(65536):
             if chunk:
-                downloaded += len(chunk)
+                total += len(chunk)
+                if total >= 5_000_000: break
+    elapsed=time.perf_counter()-start
+    if total < 4_000_000 or elapsed <= 0: raise ValueError("Incomplete speed test")
+    return total*8/elapsed/1_000_000
 
-    elapsed = time.perf_counter() - start
+@lru_cache(maxsize=512)
+def country_code(host):
+    try:
+        r=requests.get(f"https://ipwho.is/{host}",timeout=5,headers={"User-Agent":"JetConfigTester/2.0"})
+        d=r.json()
+        if d.get("success"): return (d.get("country_code") or "").upper()
+    except (requests.RequestException,ValueError): pass
+    return ""
 
-    if elapsed <= 0 or downloaded < 1000000:
-        raise ValueError("Speed test did not download enough data")
-
-    return (downloaded * 8) / elapsed / 1000000
-
-
-# ==============================
-# Test one configuration
-# ==============================
+def renamed_uri(uri):
+    u=urlsplit(uri); cc=country_code(u.hostname or "")
+    label=f"{FLAGS.get(cc,'🌐')} {NAMES.get(cc,'Unknown')} | {CHANNEL_LABEL}"
+    return urlunsplit((u.scheme,u.netloc,u.path,u.query,quote(label,safe="")))
 
 def test_config(uri):
-
-    process = None
-    phase = "parse"
-
+    proc=None; log=tempfile.TemporaryFile(); phase="parse"
     try:
-
-        config = parse_config(uri)
-
-        with open("temp_config.json", "w", encoding="utf-8") as file:
-            json.dump(config, file, ensure_ascii=False)
-
-        phase = "xray_start"
-
-        process = subprocess.Popen(
-            [XRAY, "run", "-c", "temp_config.json"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-
-        if not wait_for_xray(process):
-            raise RuntimeError("Xray proxy did not start")
-
-        proxies = {
-            "http": f"socks5h://{SOCKS_HOST}:{SOCKS_PORT}",
-            "https": f"socks5h://{SOCKS_HOST}:{SOCKS_PORT}"
-        }
-
-        phase = "latency"
-
-        latency = measure_latency(proxies)
-
-        if latency > MAX_LATENCY_MS:
-            return None
-
-        phase = "speed"
-
-        speed = measure_speed(proxies)
-
-        if speed < MIN_SPEED_MBPS:
-            return None
-
-        return {
-            "config": uri,
-            "latency_ms": round(latency, 2),
-            "speed_mbps": round(speed, 2)
-        }
-
-    except Exception as error:
-
-        # Never print the full config URI or its credentials.
-        print(
-            f"Test failed during {phase}: "
-            f"{type(error).__name__}: {str(error)[:200]}"
-        )
-
+        cfg=parse_config(uri)
+        with open("temp_config.json","w",encoding="utf-8") as f: json.dump(cfg,f,ensure_ascii=False)
+        phase="xray_start"
+        proc=subprocess.Popen([XRAY,"run","-c","temp_config.json"],stdout=subprocess.DEVNULL,stderr=log)
+        if not wait_for_xray(proc):
+            log.seek(0); detail=log.read().decode("utf-8",errors="replace").splitlines()
+            raise RuntimeError((detail[-1][:150] if detail else "Xray did not start"))
+        px=proxies(); phase="tunnel_check"; check_tunnel(px)
+        phase="latency"; ms=latency(px)
+        if ms > MAX_LATENCY_MS: return None
+        phase="speed"; mbps=speed(px)
+        if mbps < MIN_SPEED_MBPS: return None
+        return {"config":renamed_uri(uri),"latency_ms":round(ms,2),"speed_mbps":round(mbps,2)}
+    except Exception as e:
+        # Never log the full URI or credentials.
+        print(f"Test failed during {phase}: {type(e).__name__}: {str(e)[:150]}")
         return None
-
     finally:
-
-        if process:
-
-            process.terminate()
-
-            try:
-                process.wait(timeout=3)
-
-            except subprocess.TimeoutExpired:
-                process.kill()
-
-
-# ==============================
-# Main
-# ==============================
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=4)
+            except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
+        log.close()
+        try: os.remove("temp_config.json")
+        except OSError: pass
 
 def main():
-
-    print("Downloading configurations...")
-
-    configs = download_configs()
-
-    print("Unique configurations received:", len(configs))
-
-    passed = []
-
-    for index, config in enumerate(configs, 1):
-
-        result = test_config(config)
-
+    print(f"Jet Config Tester | target Xray {XRAY_VERSION}")
+    configs=[]
+    for source in SOURCE_URLS:
+        try:
+            r=requests.get(source,timeout=35,headers={"User-Agent":"JetConfigTester/2.0"}); r.raise_for_status()
+            configs.extend(x.strip() for x in r.text.splitlines() if x.strip().startswith(("vless://","trojan://")))
+        except requests.RequestException as e: print("Source download failed:",type(e).__name__)
+    configs=list(dict.fromkeys(configs)); print("Unique configurations received:",len(configs))
+    passed=[]
+    for i,uri in enumerate(configs,1):
+        result=test_config(uri)
         if result:
+            passed.append(result); print(f"{i}/{len(configs)} PASS | {result['latency_ms']} ms | {result['speed_mbps']} Mbps")
+        else: print(f"{i}/{len(configs)} FAIL")
+    with open(RESULT_FILE,"w",encoding="utf-8") as f: json.dump(passed,f,ensure_ascii=False,indent=2)
+    print(f"Total: {len(configs)} | Passed: {len(passed)} | Failed: {len(configs)-len(passed)}")
 
-            passed.append(result)
-
-            print(
-                f"{index}/{len(configs)} PASS | "
-                f"Latency: {result['latency_ms']} ms | "
-                f"Speed: {result['speed_mbps']} Mbps"
-            )
-
-        else:
-
-            print(f"{index}/{len(configs)} FAIL")
-
-    with open(RESULT_FILE, "w", encoding="utf-8") as file:
-
-        json.dump(
-            passed,
-            file,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    print("--------------------------------")
-    print("Total configurations:", len(configs))
-    print("Passed configurations:", len(passed))
-    print("Failed configurations:", len(configs) - len(passed))
-    print("--------------------------------")
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
