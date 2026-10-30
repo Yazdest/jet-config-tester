@@ -5,16 +5,16 @@ import requests
 
 SOURCES = [
     {
-        "name": "VlessFo",
-        "url": "https://sub.vlessfo.ru/vlessforu/working_configs.txt",
-    },
-    {
         "name": "mehrtat-vless-collector",
         "url": "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt",
     },
     {
         "name": "morpheusadam-v2ray-config",
         "url": "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt",
+    },
+    {
+        "name": "Idolvpn-Automate-V2ray-Config-Collector",
+        "url": "https://raw.githubusercontent.com/Idolvpn/Automate-V2ray-Config-Collector/main/configs/vless.txt",
     },
 ]
 MAX_CONFIGS_PER_RUN = 150
@@ -229,9 +229,9 @@ def main():
                 if uri not in seen:
                     seen.add(uri)
                     source_tags = {
-                        "VlessFo": "VL",
                         "mehrtat-vless-collector": "ME",
                         "morpheusadam-v2ray-config": "MA",
+                        "Idolvpn-Automate-V2ray-Config-Collector": "ID",
                     }
                     source_tag = source_tags.get(source_name, source_name[:2].upper())
                     configs.append((uri, source_tag))
