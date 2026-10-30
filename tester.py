@@ -118,6 +118,7 @@ def check_tunnel(px):
     r = requests.get(IP_CHECK_URL,proxies=px,timeout=(8,15)); r.raise_for_status()
     ip = r.text.strip()
     if not re.fullmatch(r"[0-9a-fA-F:.]+",ip): raise ValueError("Invalid proxy IP response")
+    return ip
 
 def latency(px):
     start=time.perf_counter(); r=requests.get(LATENCY_URL,proxies=px,timeout=(8,15),headers={"Cache-Control":"no-cache"})
@@ -145,12 +146,14 @@ def country_code(host):
     except (requests.RequestException,ValueError): pass
     return ""
 
-def renamed_uri(uri):
-    u=urlsplit(uri); cc=country_code(u.hostname or "")
-    label=f"{FLAGS.get(cc,'🌐')} {NAMES.get(cc,'Unknown')} | {CHANNEL_LABEL}"
+def renamed_uri(uri, exit_ip, source_tag):
+    # Country is based on the real public IP seen through the proxy tunnel,
+    # not the config server's hostname.
+    u=urlsplit(uri); cc=country_code(exit_ip)
+    label=f"{FLAGS.get(cc,'🌐')} {NAMES.get(cc,'Unknown')} | {CHANNEL_LABEL} #{source_tag}"
     return urlunsplit((u.scheme,u.netloc,u.path,u.query,quote(label,safe="")))
 
-def test_config(uri):
+def test_config(uri, source_tag):
     proc=None; log=tempfile.TemporaryFile(); phase="parse"
     try:
         cfg=parse_config(uri)
@@ -176,12 +179,12 @@ def test_config(uri):
             detail = log.read().decode("utf-8", errors="replace").splitlines()
             safe_detail = " | ".join(line[:160] for line in detail[-3:])
             raise RuntimeError(safe_detail or "Xray did not start")
-        px=proxies(); phase="tunnel_check"; check_tunnel(px)
+        px=proxies(); phase="tunnel_check"; exit_ip=check_tunnel(px)
         phase="latency"; ms=latency(px)
         if ms > MAX_LATENCY_MS: return None
         phase="speed"; mbps=speed(px)
         if mbps < MIN_SPEED_MBPS: return None
-        return {"config":renamed_uri(uri),"latency_ms":round(ms,2),"speed_mbps":round(mbps,2)}
+        return {"config":renamed_uri(uri, exit_ip, source_tag),"latency_ms":round(ms,2),"speed_mbps":round(mbps,2)}
     except Exception as e:
         # Never log the full URI or credentials.
         print(f"Test failed during {phase}: {type(e).__name__}: {str(e)[:150]}")
@@ -225,7 +228,8 @@ def main():
                 uri = items[index]
                 if uri not in seen:
                     seen.add(uri)
-                    configs.append(uri)
+                    source_tag = source_name[:2].upper()
+                    configs.append((uri, source_tag))
                 if len(configs) >= MAX_CONFIGS_PER_RUN:
                     break
         if len(configs) >= MAX_CONFIGS_PER_RUN:
@@ -233,8 +237,8 @@ def main():
 
     print(f"Unique configurations selected for testing: {len(configs)} (limit {MAX_CONFIGS_PER_RUN})")
     passed = []
-    for i, uri in enumerate(configs, 1):
-        result = test_config(uri)
+    for i, (uri, source_tag) in enumerate(configs, 1):
+        result = test_config(uri, source_tag)
         if result:
             passed.append(result)
             print(f"{i}/{len(configs)} PASS | {result['latency_ms']} ms | {result['speed_mbps']} Mbps")
