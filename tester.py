@@ -3,7 +3,7 @@ import time
 import socket
 import subprocess
 import requests
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs
 
 SOURCE_URL = "https://sub.vlessfo.ru/vlessforu/working_configs.txt"
 
@@ -11,18 +11,30 @@ XRAY = "./bin/xray"
 SOCKS_HOST = "127.0.0.1"
 SOCKS_PORT = 10808
 
-MIN_SPEED_MBPS = 5
-MAX_LATENCY_MS = 300
+MIN_SPEED_MBPS = 5.0
+MAX_LATENCY_MS = 300.0
 
-TEST_URL = "https://speed.cloudflare.com/__down?bytes=5000000"
 LATENCY_URL = "https://www.gstatic.com/generate_204"
+SPEED_URL = "https://speed.cloudflare.com/__down?bytes=5000000"
 
-TIMEOUT = 15
+LATENCY_TIMEOUT = 15
+SPEED_TIMEOUT = 30
 RESULT_FILE = "passed_configs.json"
+
+SUPPORTED_NETWORKS = {"tcp", "ws", "grpc"}
+
+
+def first(params, key, default=""):
+    values = params.get(key)
+    return values[0] if values else default
 
 
 def download_configs():
-    response = requests.get(SOURCE_URL, timeout=30)
+    response = requests.get(
+        SOURCE_URL,
+        timeout=30,
+        headers={"User-Agent": "JetConfigTester/1.0"}
+    )
     response.raise_for_status()
 
     configs = []
@@ -38,7 +50,7 @@ def download_configs():
 
 def parse_config(uri):
     parsed = urlparse(uri)
-    params = parse_qs(parsed.query)
+    params = parse_qs(parsed.query, keep_blank_values=True)
 
     protocol = parsed.scheme.lower()
 
@@ -46,12 +58,20 @@ def parse_config(uri):
         raise ValueError("Unsupported protocol")
 
     if not parsed.hostname or not parsed.port:
-        raise ValueError("Invalid server address")
+        raise ValueError("Missing server address or port")
 
     host = parsed.hostname
     port = parsed.port
-    network = params.get("type", ["tcp"])[0]
-    security = params.get("security", ["none"])[0]
+    username = parsed.username or ""
+
+    network = first(params, "type", "tcp").lower()
+    security = first(params, "security", "none").lower()
+
+    if network not in SUPPORTED_NETWORKS:
+        raise ValueError("Unsupported network: " + network)
+
+    if security not in ("tls", "reality", "none"):
+        raise ValueError("Unsupported security: " + security)
 
     stream = {
         "network": network,
@@ -59,45 +79,76 @@ def parse_config(uri):
     }
 
     if network == "ws":
-        stream["wsSettings"] = {
-            "path": unquote(params.get("path", ["/"])[0]),
+        ws_settings = {
+            "path": first(params, "path", "/"),
             "headers": {
-                "Host": params.get("host", [host])[0]
+                "Host": first(params, "host", host)
             }
         }
 
+        stream["wsSettings"] = ws_settings
+
     elif network == "grpc":
         stream["grpcSettings"] = {
-            "serviceName": params.get("serviceName", [""])[0]
+            "serviceName": first(params, "serviceName", ""),
+            "multiMode": first(params, "mode", "gun") == "multi"
         }
+
+    elif network == "tcp":
+        header_type = first(params, "headerType", "none")
+
+        if header_type == "http":
+            stream["tcpSettings"] = {
+                "header": {
+                    "type": "http",
+                    "request": {
+                        "path": [first(params, "path", "/")],
+                        "headers": {
+                            "Host": [first(params, "host", host)]
+                        }
+                    }
+                }
+            }
 
     if security == "tls":
-        stream["tlsSettings"] = {
-            "serverName": params.get("sni", [host])[0],
-            "alpn": params.get("alpn", ["h2,http/1.1"])[0].split(","),
-            "allowInsecure": False
+        tls_settings = {
+            "serverName": first(params, "sni", host),
+            "allowInsecure": first(params, "allowInsecure", "0") == "1"
         }
+
+        alpn = first(params, "alpn", "")
+        if alpn:
+            tls_settings["alpn"] = alpn.split(",")
+
+        fingerprint = first(params, "fp", "")
+        if fingerprint:
+            tls_settings["fingerprint"] = fingerprint
+
+        stream["tlsSettings"] = tls_settings
 
     elif security == "reality":
-        stream["realitySettings"] = {
-            "serverName": params.get("sni", [host])[0],
-            "fingerprint": params.get("fp", ["chrome"])[0],
-            "publicKey": params.get("pbk", [""])[0],
-            "shortId": params.get("sid", [""])[0],
-            "spiderX": params.get("spx", ["/"])[0]
-        }
+        public_key = first(params, "pbk", "")
+        if not public_key:
+            raise ValueError("Reality public key is missing")
 
-    user = unquote(parsed.username or "")
+        stream["realitySettings"] = {
+            "serverName": first(params, "sni", host),
+            "fingerprint": first(params, "fp", "chrome"),
+            "publicKey": public_key,
+            "shortId": first(params, "sid", ""),
+            "spiderX": first(params, "spx", "/")
+        }
 
     if protocol == "vless":
-        user_config = {
-            "id": user,
-            "encryption": params.get("encryption", ["none"])[0]
+        user = {
+            "id": username,
+            "encryption": first(params, "encryption", "none"),
+            "level": 0
         }
 
-        flow = params.get("flow", [""])[0]
+        flow = first(params, "flow", "")
         if flow:
-            user_config["flow"] = flow
+            user["flow"] = flow
 
         outbound = {
             "protocol": "vless",
@@ -105,23 +156,26 @@ def parse_config(uri):
                 "vnext": [{
                     "address": host,
                     "port": port,
-                    "users": [{
-                        **user_config,
-                        "level": 0
-                    }]
+                    "users": [user]
                 }]
             },
             "streamSettings": stream
         }
 
     else:
+        if not username:
+            raise ValueError("Trojan password is missing")
+
+        if security == "none":
+            raise ValueError("Trojan without TLS is not supported")
+
         outbound = {
             "protocol": "trojan",
             "settings": {
                 "servers": [{
                     "address": host,
                     "port": port,
-                    "password": user
+                    "password": username
                 }]
             },
             "streamSettings": stream
@@ -133,26 +187,80 @@ def parse_config(uri):
             "listen": SOCKS_HOST,
             "port": SOCKS_PORT,
             "protocol": "socks",
-            "settings": {"udp": True}
+            "settings": {
+                "auth": "noauth",
+                "udp": False
+            }
         }],
         "outbounds": [
             outbound,
-            {"protocol": "freedom", "tag": "direct"}
+            {
+                "protocol": "freedom",
+                "tag": "direct"
+            }
         ]
     }
 
 
-def wait_for_proxy():
-    for _ in range(30):
+def wait_for_xray(process):
+    for _ in range(40):
+        if process.poll() is not None:
+            return False
+
         try:
             with socket.create_connection(
-                (SOCKS_HOST, SOCKS_PORT), timeout=1
+                (SOCKS_HOST, SOCKS_PORT),
+                timeout=1
             ):
                 return True
         except OSError:
-            time.sleep(0.5)
+            time.sleep(0.25)
 
     return False
+
+
+def measure_latency(proxies):
+    start = time.perf_counter()
+
+    response = requests.get(
+        LATENCY_URL,
+        proxies=proxies,
+        timeout=LATENCY_TIMEOUT,
+        headers={"Cache-Control": "no-cache"}
+    )
+
+    elapsed = (time.perf_counter() - start) * 1000
+
+    if response.status_code not in (200, 204):
+        raise ValueError("Latency test failed")
+
+    return elapsed
+
+
+def measure_speed(proxies):
+    start = time.perf_counter()
+    downloaded = 0
+
+    with requests.get(
+        SPEED_URL,
+        proxies=proxies,
+        timeout=SPEED_TIMEOUT,
+        stream=True,
+        headers={"Cache-Control": "no-cache"}
+    ) as response:
+
+        response.raise_for_status()
+
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                downloaded += len(chunk)
+
+    elapsed = time.perf_counter() - start
+
+    if elapsed <= 0 or downloaded < 1000000:
+        raise ValueError("Speed test did not download enough data")
+
+    return (downloaded * 8) / elapsed / 1000000
 
 
 def test_config(uri):
@@ -161,8 +269,8 @@ def test_config(uri):
     try:
         config = parse_config(uri)
 
-        with open("temp_config.json", "w") as file:
-            json.dump(config, file)
+        with open("temp_config.json", "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False)
 
         process = subprocess.Popen(
             [XRAY, "run", "-c", "temp_config.json"],
@@ -170,64 +278,33 @@ def test_config(uri):
             stderr=subprocess.DEVNULL
         )
 
-        if not wait_for_proxy():
-            return None
+        if not wait_for_xray(process):
+            raise ValueError("Xray proxy did not start")
 
         proxies = {
             "http": f"socks5h://{SOCKS_HOST}:{SOCKS_PORT}",
             "https": f"socks5h://{SOCKS_HOST}:{SOCKS_PORT}"
         }
 
-        start = time.perf_counter()
-
-        response = requests.get(
-            LATENCY_URL,
-            proxies=proxies,
-            timeout=TIMEOUT
-        )
-
-        latency = (time.perf_counter() - start) * 1000
-
-        if response.status_code not in (200, 204):
-            return None
+        latency = measure_latency(proxies)
 
         if latency > MAX_LATENCY_MS:
             return None
 
-        start = time.perf_counter()
+        speed = measure_speed(proxies)
 
-        response = requests.get(
-            TEST_URL,
-            proxies=proxies,
-            timeout=30,
-            stream=True
-        )
-
-        response.raise_for_status()
-
-        downloaded = 0
-
-        for chunk in response.iter_content(chunk_size=65536):
-            if chunk:
-                downloaded += len(chunk)
-
-        elapsed = time.perf_counter() - start
-
-        if elapsed <= 0 or downloaded == 0:
-            return None
-
-        speed_mbps = (downloaded * 8) / elapsed / 1_000_000
-
-        if speed_mbps < MIN_SPEED_MBPS:
+        if speed < MIN_SPEED_MBPS:
             return None
 
         return {
             "config": uri,
             "latency_ms": round(latency, 2),
-            "speed_mbps": round(speed_mbps, 2)
+            "speed_mbps": round(speed, 2)
         }
 
-    except Exception:
+    except Exception as error:
+        # Do not print the URI or credentials into public workflow logs.
+        print("Test failed:", type(error).__name__)
         return None
 
     finally:
@@ -243,7 +320,7 @@ def test_config(uri):
 def main():
     configs = download_configs()
 
-    print(f"Downloaded {len(configs)} unique configs")
+    print("Unique configurations received:", len(configs))
 
     passed = []
 
@@ -252,18 +329,27 @@ def main():
 
         if result:
             passed.append(result)
+
             print(
-                f"Config {index}: PASS | "
-                f"{result['latency_ms']} ms | "
-                f"{result['speed_mbps']} Mbps"
+                f"{index}/{len(configs)} PASS | "
+                f"Latency: {result['latency_ms']} ms | "
+                f"Speed: {result['speed_mbps']} Mbps"
             )
         else:
-            print(f"Config {index}: FAIL")
+            print(f"{index}/{len(configs)} FAIL")
 
-    with open(RESULT_FILE, "w") as file:
-        json.dump(passed, file, ensure_ascii=False, indent=2)
+    with open(RESULT_FILE, "w", encoding="utf-8") as file:
+        json.dump(
+            passed,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
 
-    print(f"Passed configs: {len(passed)}")
+    print("--------------------------------")
+    print("Total configurations:", len(configs))
+    print("Passed configurations:", len(passed))
+    print("Failed configurations:", len(configs) - len(passed))
 
 
 if __name__ == "__main__":
