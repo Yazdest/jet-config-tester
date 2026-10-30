@@ -3,7 +3,21 @@ from functools import lru_cache
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs
 import requests
 
-SOURCE_URLS = ["https://sub.vlessfo.ru/vlessforu/working_configs.txt"]
+SOURCES = [
+    {
+        "name": "VlessFo",
+        "url": "https://sub.vlessfo.ru/vlessforu/working_configs.txt",
+    },
+    {
+        "name": "mehrtat-vless-collector",
+        "url": "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt",
+    },
+    {
+        "name": "0xRadikal-verified",
+        "url": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+    },
+]
+MAX_CONFIGS_PER_RUN = 150
 XRAY = "./bin/xray"
 XRAY_VERSION = "26.2.6"
 SOCKS_HOST, SOCKS_PORT = "127.0.0.1", 10808
@@ -36,7 +50,7 @@ def parse_config(uri):
     if security not in ("none", "tls", "reality"): raise ValueError("Unsupported security")
     if security == "reality" and method not in ("raw", "xhttp", "grpc"):
         raise ValueError("REALITY cannot be combined with this transport")
-    stream = {"method": method, "security": security}
+    stream = {"network": method, "security": security}
     if method == "raw":
         raw = {}
         if first(p, "headerType", default="none").lower() == "http":
@@ -63,7 +77,10 @@ def parse_config(uri):
     elif method == "httpupgrade":
         stream["httpupgradeSettings"] = {"path":first(p,"path",default="/"),"host":first(p,"host",default=host)}
     if security == "tls":
-        tls = {"serverName":first(p,"sni","servername",default=host)}
+        tls = {
+            "serverName": first(p, "sni", "servername", default=host),
+            "allowInsecure": first(p, "allowInsecure", "insecure", default="0").lower() in ("1", "true", "yes"),
+        }
         if first(p,"alpn"): tls["alpn"] = [x for x in first(p,"alpn").split(",") if x]
         if first(p,"fp"): tls["fingerprint"] = first(p,"fp")
         stream["tlsSettings"] = tls
@@ -137,12 +154,28 @@ def test_config(uri):
     proc=None; log=tempfile.TemporaryFile(); phase="parse"
     try:
         cfg=parse_config(uri)
-        with open("temp_config.json","w",encoding="utf-8") as f: json.dump(cfg,f,ensure_ascii=False)
+        with open("temp_config.json","w",encoding="utf-8") as f:
+            json.dump(cfg,f,ensure_ascii=False)
+
+        phase = "config_validation"
+        validation = subprocess.run(
+            [XRAY, "run", "-test", "-c", "temp_config.json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if validation.returncode != 0:
+            details = (validation.stderr or validation.stdout or "").splitlines()
+            safe_detail = details[-1][:180] if details else "Xray config validation failed"
+            raise RuntimeError(safe_detail)
+
         phase="xray_start"
         proc=subprocess.Popen([XRAY,"run","-c","temp_config.json"],stdout=subprocess.DEVNULL,stderr=log)
         if not wait_for_xray(proc):
-            log.seek(0); detail=log.read().decode("utf-8",errors="replace").splitlines()
-            raise RuntimeError((detail[-1][:150] if detail else "Xray did not start"))
+            log.seek(0)
+            detail = log.read().decode("utf-8", errors="replace").splitlines()
+            safe_detail = " | ".join(line[:160] for line in detail[-3:])
+            raise RuntimeError(safe_detail or "Xray did not start")
         px=proxies(); phase="tunnel_check"; check_tunnel(px)
         phase="latency"; ms=latency(px)
         if ms > MAX_LATENCY_MS: return None
@@ -164,20 +197,53 @@ def test_config(uri):
 
 def main():
     print(f"Jet Config Tester | target Xray {XRAY_VERSION}")
-    configs=[]
-    for source in SOURCE_URLS:
+    source_configs = []
+    for source in SOURCES:
+        items = []
         try:
-            r=requests.get(source,timeout=35,headers={"User-Agent":"JetConfigTester/2.0"}); r.raise_for_status()
-            configs.extend(x.strip() for x in r.text.splitlines() if x.strip().startswith(("vless://","trojan://")))
-        except requests.RequestException as e: print("Source download failed:",type(e).__name__)
-    configs=list(dict.fromkeys(configs)); print("Unique configurations received:",len(configs))
-    passed=[]
-    for i,uri in enumerate(configs,1):
-        result=test_config(uri)
+            response = requests.get(
+                source["url"], timeout=35,
+                headers={"User-Agent": "JetConfigTester/2.0"}
+            )
+            response.raise_for_status()
+            items = [
+                line.strip() for line in response.text.splitlines()
+                if line.strip().startswith(("vless://", "trojan://"))
+            ]
+            print(f"Source {source['name']}: {len(items)} candidate configs")
+        except requests.RequestException as exc:
+            print(f"Source {source['name']} download failed: {type(exc).__name__}")
+        source_configs.append((source["name"], list(dict.fromkeys(items))))
+
+    # Interleave sources so a large feed cannot crowd out the others.
+    configs = []
+    seen = set()
+    max_depth = max((len(items) for _, items in source_configs), default=0)
+    for index in range(max_depth):
+        for source_name, items in source_configs:
+            if index < len(items):
+                uri = items[index]
+                if uri not in seen:
+                    seen.add(uri)
+                    configs.append(uri)
+                if len(configs) >= MAX_CONFIGS_PER_RUN:
+                    break
+        if len(configs) >= MAX_CONFIGS_PER_RUN:
+            break
+
+    print(f"Unique configurations selected for testing: {len(configs)} (limit {MAX_CONFIGS_PER_RUN})")
+    passed = []
+    for i, uri in enumerate(configs, 1):
+        result = test_config(uri)
         if result:
-            passed.append(result); print(f"{i}/{len(configs)} PASS | {result['latency_ms']} ms | {result['speed_mbps']} Mbps")
-        else: print(f"{i}/{len(configs)} FAIL")
-    with open(RESULT_FILE,"w",encoding="utf-8") as f: json.dump(passed,f,ensure_ascii=False,indent=2)
-    print(f"Total: {len(configs)} | Passed: {len(passed)} | Failed: {len(configs)-len(passed)}")
+            passed.append(result)
+            print(f"{i}/{len(configs)} PASS | {result['latency_ms']} ms | {result['speed_mbps']} Mbps")
+        else:
+            print(f"{i}/{len(configs)} FAIL")
+
+    with open(RESULT_FILE, "w", encoding="utf-8") as f:
+        json.dump(passed, f, ensure_ascii=False, indent=2)
+    print(f"Total tested: {len(configs)} | Passed: {len(passed)} | Failed: {len(configs)-len(passed)}")
+    print("Failure phases are reported per config: parse, config_validation, xray_start, tunnel_check, latency, speed.")
 
 if __name__ == "__main__": main()
