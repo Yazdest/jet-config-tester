@@ -1,0 +1,4 @@
+name: Jet Config Tester
+
+on:
+  workflow_dispatch:
