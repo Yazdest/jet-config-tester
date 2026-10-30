@@ -3,7 +3,7 @@ name: Jet Config Tester
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/15 * * * *'
 
 permissions:
   contents: read
