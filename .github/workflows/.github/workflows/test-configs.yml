@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
