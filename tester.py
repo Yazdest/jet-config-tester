@@ -13,8 +13,8 @@ SOURCES = [
         "url": "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt",
     },
     {
-        "name": "0xRadikal-verified",
-        "url": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+        "name": "morpheusadam-v2ray-config",
+        "url": "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt",
     },
 ]
 MAX_CONFIGS_PER_RUN = 150
@@ -228,7 +228,12 @@ def main():
                 uri = items[index]
                 if uri not in seen:
                     seen.add(uri)
-                    source_tag = source_name[:2].upper()
+                    source_tags = {
+                        "VlessFo": "VL",
+                        "mehrtat-vless-collector": "ME",
+                        "morpheusadam-v2ray-config": "MA",
+                    }
+                    source_tag = source_tags.get(source_name, source_name[:2].upper())
                     configs.append((uri, source_tag))
                 if len(configs) >= MAX_CONFIGS_PER_RUN:
                     break
