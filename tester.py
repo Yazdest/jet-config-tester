@@ -304,7 +304,7 @@ def test_config(uri):
 
     except Exception as error:
         # Do not print the URI or credentials into public workflow logs.
-        print("Test failed:", type(error).__name__)
+        print("Test failed:", type(error).name, str(error)[:200])
         return None
 
     finally:
