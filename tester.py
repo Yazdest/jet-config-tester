@@ -16,6 +16,18 @@ SOURCES = [
         "name": "Idolvpn-Automate-V2ray-Config-Collector",
         "url": "https://raw.githubusercontent.com/Idolvpn/Automate-V2ray-Config-Collector/main/configs/vless.txt",
     },
+    {
+        "name": "Bllare-V2ray-Configs",
+        "url": "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt",
+    },
+    {
+        "name": "Farid-Karimi-Config-Collector",
+        "url": "https://raw.githubusercontent.com/Farid-Karimi/Config-Collector/main/vless_iran.txt",
+    },
+    {
+        "name": "miladtahanian-Config-Collector",
+        "url": "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
+    },
 ]
 MAX_CONFIGS_PER_RUN = 150
 XRAY = "./bin/xray"
@@ -232,6 +244,9 @@ def main():
                         "mehrtat-vless-collector": "ME",
                         "morpheusadam-v2ray-config": "MA",
                         "Idolvpn-Automate-V2ray-Config-Collector": "ID",
+                        "Bllare-V2ray-Configs": "BL",
+                        "Farid-Karimi-Config-Collector": "FK",
+                        "miladtahanian-Config-Collector": "MT",
                     }
                     source_tag = source_tags.get(source_name, source_name[:2].upper())
                     configs.append((uri, source_tag))
