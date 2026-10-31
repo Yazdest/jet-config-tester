@@ -9,24 +9,20 @@ SOURCES = [
         "url": "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt",
     },
     {
-        "name": "morpheusadam-v2ray-config",
-        "url": "https://raw.githubusercontent.com/morpheusadam/v2ray-config/main/subs/bundles/all.txt",
-    },
-    {
-        "name": "Idolvpn-Automate-V2ray-Config-Collector",
-        "url": "https://raw.githubusercontent.com/Idolvpn/Automate-V2ray-Config-Collector/main/configs/vless.txt",
-    },
-    {
         "name": "Bllare-V2ray-Configs",
         "url": "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt",
     },
     {
-        "name": "Farid-Karimi-Config-Collector",
-        "url": "https://raw.githubusercontent.com/Farid-Karimi/Config-Collector/main/vless_iran.txt",
+        "name": "MahanKenway-Freedom-V2Ray",
+        "url": "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/vless.txt",
     },
     {
-        "name": "miladtahanian-Config-Collector",
-        "url": "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
+        "name": "MohammadBahemmat-V2ray-Collector",
+        "url": "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/servers/vless_servers.txt",
+    },
+    {
+        "name": "Delta-Kronecker-V2ray-Config",
+        "url": "https://raw.githubusercontent.com/Delta-Kronecker/V2ray-Config/main/config/protocols/vless.txt",
     },
 ]
 MAX_CONFIGS_PER_RUN = 150
@@ -242,11 +238,10 @@ def main():
                     seen.add(uri)
                     source_tags = {
                         "mehrtat-vless-collector": "ME",
-                        "morpheusadam-v2ray-config": "MA",
-                        "Idolvpn-Automate-V2ray-Config-Collector": "ID",
                         "Bllare-V2ray-Configs": "BL",
-                        "Farid-Karimi-Config-Collector": "FK",
-                        "miladtahanian-Config-Collector": "MT",
+                        "MahanKenway-Freedom-V2Ray": "MK",
+                        "MohammadBahemmat-V2ray-Collector": "MB",
+                        "Delta-Kronecker-V2ray-Config": "DK",
                     }
                     source_tag = source_tags.get(source_name, source_name[:2].upper())
                     configs.append((uri, source_tag))
