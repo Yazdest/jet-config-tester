@@ -8,8 +8,6 @@ SOURCES = [
         "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt"]},
     {"name": "Bllare-V2ray-Configs", "tag": "BL", "urls": [
         "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt"]},
-    {"name": "MahanKenway-Freedom-V2Ray", "tag": "MK", "urls": [
-        "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/vless.txt"]},
     {"name": "Delta-Kronecker-V2ray-Config", "tag": "DK", "urls": [
         "https://raw.githubusercontent.com/Delta-Kronecker/V2ray-Config/main/config/protocols/vless.txt"]},
     {"name": "barry-far-V2ray-Config", "tag": "BF", "urls": [
@@ -20,8 +18,6 @@ SOURCES = [
     {"name": "MatinGhanbari-v2ray-configs", "tag": "MG", "urls": [
         f"https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/subs/sub{i}.txt"
         for i in range(1, 40)]},
-    {"name": "liketolivefree-kobabi", "tag": "KB", "urls": [
-        "https://raw.githubusercontent.com/liketolivefree/kobabi/main/sub.txt"]},
 ]
 MAX_CONFIGS_PER_RUN = 150
 XRAY = "./bin/xray"
@@ -181,20 +177,45 @@ def speed(px):
     return total*8/elapsed/1_000_000
 
 @lru_cache(maxsize=512)
-def country_code(host):
+def country_lookup(exit_ip):
+    """Query two independent GeoIP providers for the actual tunnel exit IP."""
+    found = []
+    headers = {"User-Agent": "JetConfigTester/2.1"}
     try:
-        r=requests.get(f"https://ipwho.is/{host}",timeout=5,headers={"User-Agent":"JetConfigTester/2.0"})
-        d=r.json()
-        if d.get("success"): return (d.get("country_code") or "").upper()
-    except (requests.RequestException,ValueError): pass
-    return ""
+        r = requests.get(f"https://ipwho.is/{exit_ip}", timeout=6, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("success") and data.get("country_code"):
+            found.append(str(data["country_code"]).upper())
+    except (requests.RequestException, ValueError, TypeError):
+        pass
+    try:
+        r = requests.get(f"https://ipapi.co/{exit_ip}/json/", timeout=6, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+        code = data.get("country_code")
+        if code and not data.get("error"):
+            found.append(str(code).upper())
+    except (requests.RequestException, ValueError, TypeError):
+        pass
+    # Require agreement; one answer alone is not enough to assert a flag.
+    if len(found) >= 2 and found[0] == found[1]:
+        return {"country_code": found[0], "verified": True, "providers": 2}
+    return {"country_code": "", "verified": False, "providers": len(found),
+            "reported_codes": list(dict.fromkeys(found))}
 
 def renamed_uri(uri, exit_ip, source_tag):
-    # Country is based on the real public IP seen through the proxy tunnel,
-    # not the config server's hostname.
-    u=urlsplit(uri); cc=country_code(exit_ip)
-    label=f"{FLAGS.get(cc,'🌐')} {NAMES.get(cc,'Unknown')} | {CHANNEL_LABEL} #{source_tag}"
-    return urlunsplit((u.scheme,u.netloc,u.path,u.query,quote(label,safe="")))
+    # GeoIP is based on the actual public IP seen through the tunnel,
+    # never on the config server hostname. Disagreement means no country flag.
+    u = urlsplit(uri)
+    geo = country_lookup(exit_ip)
+    cc = geo["country_code"]
+    if geo["verified"]:
+        country_label = f"{FLAGS.get(cc, '🌐')} {NAMES.get(cc, cc)}"
+    else:
+        country_label = "🌐 موقعیت نامشخص"
+    label = f"{country_label} | {CHANNEL_LABEL} #{source_tag}"
+    return urlunsplit((u.scheme, u.netloc, u.path, u.query, quote(label, safe=""))), geo
 
 def test_config(uri, source_tag):
     proc=None; log=tempfile.TemporaryFile(); phase="parse"
@@ -227,7 +248,13 @@ def test_config(uri, source_tag):
         if ms > MAX_LATENCY_MS: return None
         phase="speed"; mbps=speed(px)
         if mbps < MIN_SPEED_MBPS: return None
-        return {"config":renamed_uri(uri, exit_ip, source_tag),"latency_ms":round(ms,2),"speed_mbps":round(mbps,2)}
+        renamed, geo = renamed_uri(uri, exit_ip, source_tag)
+        return {"config": renamed, "exit_ip": exit_ip,
+                "country_code": geo["country_code"],
+                "country_verified": geo["verified"],
+                "geoip_providers": geo["providers"],
+                "geoip_reported_codes": geo.get("reported_codes", []),
+                "latency_ms": round(ms, 2), "speed_mbps": round(mbps, 2)}
     except Exception as e:
         # Never log the full URI or credentials.
         print(f"Test failed during {phase}: {type(e).__name__}: {str(e)[:150]}")
