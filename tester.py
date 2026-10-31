@@ -4,26 +4,24 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs
 import requests
 
 SOURCES = [
-    {
-        "name": "mehrtat-vless-collector",
-        "url": "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt",
-    },
-    {
-        "name": "Bllare-V2ray-Configs",
-        "url": "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt",
-    },
-    {
-        "name": "MahanKenway-Freedom-V2Ray",
-        "url": "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/vless.txt",
-    },
-    {
-        "name": "MohammadBahemmat-V2ray-Collector",
-        "url": "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/servers/vless_servers.txt",
-    },
-    {
-        "name": "Delta-Kronecker-V2ray-Config",
-        "url": "https://raw.githubusercontent.com/Delta-Kronecker/V2ray-Config/main/config/protocols/vless.txt",
-    },
+    {"name": "mehrtat-vless-collector", "tag": "ME", "urls": [
+        "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt"]},
+    {"name": "Bllare-V2ray-Configs", "tag": "BL", "urls": [
+        "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt"]},
+    {"name": "MahanKenway-Freedom-V2Ray", "tag": "MK", "urls": [
+        "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/vless.txt"]},
+    {"name": "Delta-Kronecker-V2ray-Config", "tag": "DK", "urls": [
+        "https://raw.githubusercontent.com/Delta-Kronecker/V2ray-Config/main/config/protocols/vless.txt"]},
+    {"name": "barry-far-V2ray-Config", "tag": "BF", "urls": [
+        "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/vless.txt",
+        "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/vmess.txt",
+        "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/trojan.txt",
+        "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/ss.txt"]},
+    {"name": "MatinGhanbari-v2ray-configs", "tag": "MG", "urls": [
+        f"https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/subs/sub{i}.txt"
+        for i in range(1, 40)]},
+    {"name": "liketolivefree-kobabi", "tag": "KB", "urls": [
+        "https://raw.githubusercontent.com/liketolivefree/kobabi/main/sub.txt"]},
 ]
 MAX_CONFIGS_PER_RUN = 150
 XRAY = "./bin/xray"
@@ -45,67 +43,104 @@ def first(p, *keys, default=""):
         if v and v[0] != "": return v[0]
     return default
 
-def parse_config(uri):
-    u = urlsplit(uri); p = parse_qs(u.query, keep_blank_values=True)
-    protocol = u.scheme.lower()
-    if protocol not in ("vless", "trojan") or not u.hostname or not u.port:
-        raise ValueError("Invalid URI or unsupported protocol")
-    host, port, credential = u.hostname, u.port, unquote(u.username or "")
-    net = first(p, "type", "network", default="raw").lower()
+def _decode_b64(value):
+    import base64
+    value = value.strip()
+    value += "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value.encode()).decode("utf-8-sig")
+
+def _stream_settings(p, host):
+    net = str(p.get("net", p.get("type", p.get("network", "tcp"))) or "tcp").lower()
     if net not in SUPPORTED: raise ValueError("Unsupported transport")
     method = {"tcp":"raw", "ws":"websocket", "splithttp":"xhttp"}.get(net, net)
-    security = first(p, "security", default="none").lower()
+    security = str(p.get("tls", p.get("security", "none")) or "none").lower()
+    if security in ("true", "1"): security = "tls"
     if security not in ("none", "tls", "reality"): raise ValueError("Unsupported security")
     if security == "reality" and method not in ("raw", "xhttp", "grpc"):
         raise ValueError("REALITY cannot be combined with this transport")
     stream = {"network": method, "security": security}
+    path = p.get("path", "/") or "/"
+    host_header = p.get("host", host) or host
     if method == "raw":
+        header_type = p.get("headerType", "none") or "none"
         raw = {}
-        if first(p, "headerType", default="none").lower() == "http":
-            raw["header"] = {"type":"http", "request":{"path":[first(p,"path",default="/")],"headers":{"Host":[first(p,"host",default=host)]}}}
+        if str(header_type).lower() == "http":
+            raw["header"] = {"type":"http", "request":{"path":[path],"headers":{"Host":[host_header]}}}
         stream["rawSettings"] = raw
     elif method == "websocket":
-        ws = {"path":first(p,"path",default="/"),"headers":{}}
-        if first(p,"host"): ws["headers"]["Host"] = first(p,"host")
-        stream["wsSettings"] = ws
+        stream["wsSettings"] = {"path":path,"headers":{"Host":host_header}}
     elif method == "grpc":
-        grpc = {"serviceName":first(p,"serviceName","service_name"),"multiMode":first(p,"mode",default="gun").lower()=="multi"}
-        if first(p,"authority"): grpc["authority"] = first(p,"authority")
+        grpc = {"serviceName":p.get("serviceName", p.get("service_name", "")) or "", "multiMode":str(p.get("mode", "gun")).lower()=="multi"}
+        if p.get("authority"): grpc["authority"] = p["authority"]
         stream["grpcSettings"] = grpc
     elif method == "xhttp":
-        xhttp = {"path":first(p,"path",default="/"),"mode":first(p,"mode",default="auto")}
-        if first(p,"host"): xhttp["host"] = first(p,"host")
-        extra = first(p,"extra")
-        if extra:
-            try:
-                parsed_extra = json.loads(extra)
-                if isinstance(parsed_extra, dict): xhttp["extra"] = parsed_extra
-            except json.JSONDecodeError: pass
+        xhttp = {"path":path,"mode":p.get("mode", "auto") or "auto"}
+        if host_header: xhttp["host"] = host_header
         stream["xhttpSettings"] = xhttp
     elif method == "httpupgrade":
-        stream["httpupgradeSettings"] = {"path":first(p,"path",default="/"),"host":first(p,"host",default=host)}
+        stream["httpupgradeSettings"] = {"path":path,"host":host_header}
     if security == "tls":
-        tls = {
-            "serverName": first(p, "sni", "servername", default=host),
-            "allowInsecure": first(p, "allowInsecure", "insecure", default="0").lower() in ("1", "true", "yes"),
-        }
-        if first(p,"alpn"): tls["alpn"] = [x for x in first(p,"alpn").split(",") if x]
-        if first(p,"fp"): tls["fingerprint"] = first(p,"fp")
+        tls = {"serverName":p.get("sni", p.get("servername", host)) or host,
+               "allowInsecure":str(p.get("allowInsecure", p.get("insecure", "0"))).lower() in ("1","true","yes")}
+        alpn = p.get("alpn")
+        if alpn: tls["alpn"] = [x for x in str(alpn).split(",") if x]
+        fp = p.get("fp")
+        if fp: tls["fingerprint"] = fp
         stream["tlsSettings"] = tls
     elif security == "reality":
-        pbk = first(p,"pbk","publicKey")
+        pbk = p.get("pbk", p.get("publicKey"))
         if not pbk: raise ValueError("REALITY public key missing")
-        stream["realitySettings"] = {"serverName":first(p,"sni","servername",default=host),"fingerprint":first(p,"fp",default="chrome"),"password":pbk,"shortId":first(p,"sid"),"spiderX":first(p,"spx",default="/")}
-        if first(p,"pqv"): stream["realitySettings"]["mldsa65Verify"] = first(p,"pqv")
-    if protocol == "vless":
-        if not credential: raise ValueError("VLESS UUID missing")
-        user = {"id":credential,"encryption":first(p,"encryption",default="none")}
-        if first(p,"flow"): user["flow"] = first(p,"flow")
-        outbound = {"protocol":"vless","settings":{"vnext":[{"address":host,"port":port,"users":[user]}]},"streamSettings":stream}
+        stream["realitySettings"] = {"serverName":p.get("sni", p.get("servername", host)) or host,
+            "fingerprint":p.get("fp", "chrome") or "chrome", "password":pbk,
+            "shortId":p.get("sid", "") or "", "spiderX":p.get("spx", "/") or "/"}
+    return stream
+
+def parse_config(uri):
+    u = urlsplit(uri); protocol = u.scheme.lower()
+    if protocol == "vmess":
+        raw = u.netloc or u.path
+        data = json.loads(_decode_b64(raw))
+        host = data.get("add") or data.get("host")
+        port = int(data.get("port", 0))
+        uuid = data.get("id", "")
+        if not host or not port or not uuid: raise ValueError("Invalid VMess fields")
+        p = {k:data.get(k) for k in ("net","type","host","path","tls","sni","alpn","fp","serviceName","mode","authority") if data.get(k) is not None}
+        stream = _stream_settings(p, host)
+        user = {"id":uuid,"alterId":int(data.get("aid", 0) or 0),"security":data.get("scy", "auto") or "auto"}
+        outbound = {"protocol":"vmess","settings":{"vnext":[{"address":host,"port":port,"users":[user]}]},"streamSettings":stream}
+    elif protocol == "ss":
+        raw = u.netloc
+        if "@" not in raw:
+            decoded = _decode_b64(raw.split("#",1)[0])
+            if "@" not in decoded: raise ValueError("Invalid Shadowsocks URI")
+            raw = decoded
+        userinfo, endpoint = raw.rsplit("@",1)
+        if ":" not in endpoint: raise ValueError("Invalid Shadowsocks endpoint")
+        host, port_text = endpoint.rsplit(":",1)
+        port = int(port_text)
+        if userinfo.startswith("["):
+            userinfo = _decode_b64(userinfo[1:-1])
+        elif ":" not in userinfo:
+            userinfo = _decode_b64(userinfo)
+        method, password = userinfo.split(":",1)
+        if not host or not password: raise ValueError("Invalid Shadowsocks credentials")
+        outbound = {"protocol":"shadowsocks","settings":{"servers":[{"address":host,"port":port,"method":method,"password":password}]}}
+    elif protocol in ("vless", "trojan"):
+        p = {k:v[0] for k,v in parse_qs(u.query, keep_blank_values=True).items() if v}
+        if not u.hostname or not u.port: raise ValueError("Invalid server address")
+        host, port, credential = u.hostname, u.port, unquote(u.username or "")
+        stream = _stream_settings(p, host)
+        if protocol == "vless":
+            if not credential: raise ValueError("VLESS UUID missing")
+            user = {"id":credential,"encryption":p.get("encryption", "none") or "none"}
+            if p.get("flow"): user["flow"] = p["flow"]
+            outbound = {"protocol":"vless","settings":{"vnext":[{"address":host,"port":port,"users":[user]}]},"streamSettings":stream}
+        else:
+            if not credential: raise ValueError("Trojan password missing")
+            if stream["security"] == "none": raise ValueError("Trojan without TLS/REALITY rejected")
+            outbound = {"protocol":"trojan","settings":{"servers":[{"address":host,"port":port,"password":credential}]},"streamSettings":stream}
     else:
-        if not credential: raise ValueError("Trojan password missing")
-        if security == "none": raise ValueError("Trojan without TLS/REALITY rejected")
-        outbound = {"protocol":"trojan","settings":{"servers":[{"address":host,"port":port,"password":credential}]},"streamSettings":stream}
+        raise ValueError("Unsupported protocol")
     return {"log":{"loglevel":"warning"},"inbounds":[{"listen":SOCKS_HOST,"port":SOCKS_PORT,"protocol":"socks","settings":{"auth":"noauth","udp":False}}],"outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]}
 
 def wait_for_xray(proc):
@@ -206,49 +241,60 @@ def test_config(uri, source_tag):
         try: os.remove("temp_config.json")
         except OSError: pass
 
+def extract_subscription_lines(text):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    accepted = ("vless://", "vmess://", "trojan://", "ss://")
+    direct = [line for line in lines if line.lower().startswith(accepted)]
+    if direct:
+        return direct
+    # Some subscription endpoints return one Base64-encoded text blob.
+    compact = "".join(lines)
+    if compact and not compact.startswith(("#", "{")):
+        try:
+            decoded = _decode_b64(compact)
+            return [line.strip() for line in decoded.splitlines()
+                    if line.strip().lower().startswith(accepted)]
+        except Exception:
+            pass
+    return []
+
+def fetch_source(source):
+    collected = []
+    for index, url in enumerate(source["urls"], 1):
+        try:
+            response = requests.get(url, timeout=(5, 12),
+                headers={"User-Agent":"JetConfigTester/3.0"})
+            response.raise_for_status()
+            found = extract_subscription_lines(response.text)
+            if found:
+                collected.extend(found)
+                print(f"Source {source['name']} [{index}/{len(source['urls'])}]: {len(found)} configs")
+            else:
+                print(f"Source {source['name']} [{index}/{len(source['urls'])}]: empty/unsupported")
+        except requests.RequestException as exc:
+            print(f"Source {source['name']} [{index}/{len(source['urls'])}] skipped: {type(exc).__name__}")
+            continue
+    return list(dict.fromkeys(collected))
+
 def main():
     print(f"Jet Config Tester | target Xray {XRAY_VERSION}")
     source_configs = []
     for source in SOURCES:
-        items = []
-        try:
-            response = requests.get(
-                source["url"], timeout=35,
-                headers={"User-Agent": "JetConfigTester/2.0"}
-            )
-            response.raise_for_status()
-            items = [
-                line.strip() for line in response.text.splitlines()
-                if line.strip().startswith(("vless://", "trojan://"))
-            ]
-            print(f"Source {source['name']}: {len(items)} candidate configs")
-        except requests.RequestException as exc:
-            print(f"Source {source['name']} download failed: {type(exc).__name__}")
-        source_configs.append((source["name"], list(dict.fromkeys(items))))
+        items = fetch_source(source)
+        source_configs.append((source["name"], source["tag"], items))
+        print(f"Source total {source['name']}: {len(items)} unique candidates")
 
-    # Interleave sources so a large feed cannot crowd out the others.
-    configs = []
-    seen = set()
-    max_depth = max((len(items) for _, items in source_configs), default=0)
+    # Round-robin across sources to prevent a large subscription crowding out others.
+    configs, seen = [], set()
+    max_depth = max((len(items) for _, _, items in source_configs), default=0)
     for index in range(max_depth):
-        for source_name, items in source_configs:
+        for source_name, source_tag, items in source_configs:
             if index < len(items):
                 uri = items[index]
                 if uri not in seen:
-                    seen.add(uri)
-                    source_tags = {
-                        "mehrtat-vless-collector": "ME",
-                        "Bllare-V2ray-Configs": "BL",
-                        "MahanKenway-Freedom-V2Ray": "MK",
-                        "MohammadBahemmat-V2ray-Collector": "MB",
-                        "Delta-Kronecker-V2ray-Config": "DK",
-                    }
-                    source_tag = source_tags.get(source_name, source_name[:2].upper())
-                    configs.append((uri, source_tag))
-                if len(configs) >= MAX_CONFIGS_PER_RUN:
-                    break
-        if len(configs) >= MAX_CONFIGS_PER_RUN:
-            break
+                    seen.add(uri); configs.append((uri, source_tag))
+                if len(configs) >= MAX_CONFIGS_PER_RUN: break
+        if len(configs) >= MAX_CONFIGS_PER_RUN: break
 
     print(f"Unique configurations selected for testing: {len(configs)} (limit {MAX_CONFIGS_PER_RUN})")
     passed = []
@@ -263,6 +309,6 @@ def main():
     with open(RESULT_FILE, "w", encoding="utf-8") as f:
         json.dump(passed, f, ensure_ascii=False, indent=2)
     print(f"Total tested: {len(configs)} | Passed: {len(passed)} | Failed: {len(configs)-len(passed)}")
-    print("Failure phases are reported per config: parse, config_validation, xray_start, tunnel_check, latency, speed.")
+    print("Supported tested protocols: VLESS, VMess, Trojan, Shadowsocks. SSR/TUIC/Hysteria2 and unsupported transports are skipped.")
 
 if __name__ == "__main__": main()
