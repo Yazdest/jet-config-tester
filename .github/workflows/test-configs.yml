@@ -36,6 +36,13 @@ jobs:
           unzip -o xray.zip -d bin
           chmod +x bin/xray
           bin/xray version
+      - name: Restore state (sent / failed history)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: jet-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            jet-state-
       - name: Test configurations
         run: python tester.py
       - name: Publish passing configurations
@@ -44,3 +51,9 @@ jobs:
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           APPS_SCRIPT_SECRET: ${{ secrets.APPS_SCRIPT_SECRET }}
         run: python publish.py
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: jet-state-${{ github.run_id }}-${{ github.run_attempt }}
