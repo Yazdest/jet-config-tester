@@ -61,23 +61,40 @@ def build_teaser(minutes, last):
     return f"{hook} {timing.format(m=m)}", {"hook": hook, "timing": timing}
 
 
-def send_teaser(text):
-    """Ask Apps Script to post the teaser (it holds the bot token)."""
+# Short how-to message posted right after the configs.
+GUIDES = [
+    "کانفیگ‌ها رو کپی کنید، پینگ بگیرید و سازگارترین‌ها با اینترنتتون رو پیدا کنید ✅ بعدش فقط لذت ببرید 😉",
+    "یه دور همه رو پینگ بگیرید 📶 ببینید کدوم با اینترنت شما سازگارتره و بی‌دغدغه وصل شید 🔥",
+    "پینگ‌ها رو چک کنید 👀 هرکدوم با اینترنت شما سازگار بود مال شماست، با خیال راحت لذت ببرید 😍",
+    "همه‌ی کانفیگ‌ها رو کپی کنید و توی v2ray پینگ بگیرید 📲 سازگارها با اینترنت شما سبز می‌شن، وصل شید و حالشو ببرید 🟢",
+    "اول کپی، بعد پینگ، بعد انتخاب کانفیگی که با اینترنت شما سازگاره 🤝 و در آخر لذت از اینترنت سریع 🚀",
+]
+
+
+def build_guide(last):
+    """Pick a guide wording different from the previous one."""
+    choices = [g for g in GUIDES if g != last.get("guide")] or GUIDES
+    guide = random.choice(choices)
+    return guide, {"guide": guide}
+
+
+def send_text(text, bold=False):
+    """Ask Apps Script to post a plain text message (it holds the bot token)."""
     try:
         response = requests.post(
             APPS_SCRIPT_URL,
-            json={"secret": APPS_SCRIPT_SECRET, "action": "teaser", "text": text},
+            json={"secret": APPS_SCRIPT_SECRET, "action": "teaser", "text": text, "bold": bold},
             timeout=60,
             allow_redirects=True,
         )
         response.raise_for_status()
         result = response.json()
         if not result.get("ok"):
-            print("WARNING: teaser rejected by Apps Script:", result.get("error", "Unknown error"))
+            print("WARNING: message rejected by Apps Script:", result.get("error", "Unknown error"))
             return False
         return True
     except (requests.RequestException, ValueError) as error:
-        print(f"WARNING: teaser not sent ({type(error).__name__}).")
+        print(f"WARNING: message not sent ({type(error).__name__}).")
         return False
 
 
@@ -126,8 +143,8 @@ def main():
     # Teaser first, then wait so the audience has time to get curious.
     last = load_json(TEASER_FILE, {})
     text, picked = build_teaser(TEASER_DELAY_MINUTES, last)
-    if send_teaser(text):
-        save_json(TEASER_FILE, picked)
+    if send_text(text, bold=True):
+        save_json(TEASER_FILE, {**last, **picked})
         print(f"Teaser sent. Waiting {TEASER_DELAY_MINUTES:g} minutes before publishing...")
         sys.stdout.flush()
         time.sleep(TEASER_DELAY_MINUTES * 60)
@@ -168,6 +185,13 @@ def main():
         print("Publication request completed.")
         print("Passing configurations:", result.get("received", 0))
         print("Telegram messages sent:", result.get("sent", 0))
+
+        # How-to message after the configs (only if something was really posted).
+        if result.get("sent", 0) > 0:
+            last = load_json(TEASER_FILE, {})
+            text, picked = build_guide(last)
+            if send_text(text, bold=True):
+                save_json(TEASER_FILE, {**last, **picked})
 
     except requests.RequestException as error:
         print("ERROR: Could not contact Apps Script.")
