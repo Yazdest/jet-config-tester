@@ -18,36 +18,31 @@ TEASER_DELAY_MINUTES = float(os.environ.get("TEASER_DELAY_MINUTES", "5"))
 
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 APPS_SCRIPT_SECRET = os.environ.get("APPS_SCRIPT_SECRET")
-# ---- teaser message (parts are mixed randomly so no two posts look alike) ----
-OPENERS = [
-    "سلام دوستان 👋",
-    "هی رفقا 😎",
-    "وقتتون بخیر عزیزان ✨",
-    "سلام به همه‌ی همراهان جت 🚀",
-    "چطورید جماعت؟ 😄",
-    "ببینم کی اینجاست؟ 👀",
-    "سلام سلام 🙌",
-    "رفقا یه لحظه حواستون به من باشه 📢",
-]
-
-QUESTIONS = [
-    "آماده‌اید تا کانفیگ‌های جدید و پرسرعت رو براتون قرار بدم؟ ⚡️",
-    "کانفیگ‌های تازه و تست‌شده رسیدن؛ شما آماده‌اید؟ 🔥",
-    "یه دسته کانفیگ سریع و خوش‌پینگ آماده کردم، حاضرید؟ 🚀",
-    "کانفیگ‌های نو از زیر دست تست دراومدن! دلتون براشون تنگ نشده؟ 😍",
-    "آماده‌اید برای یه دور اینترنت پرسرعت؟ 🏎",
-    "دسته‌ی تازه‌ی کانفیگ‌های سریع آماده‌ی انتشاره، شما چطور؟ 💥",
-    "کانفیگ‌های پرسرعت جدید رو تست کردم و جواب دادن؛ بذارمشون؟ 😉",
-    "می‌خواید ببینید این دفعه چه کانفیگ‌های تازه و تیزی گیرم اومده؟ 🤩",
+# ---- teaser message ----------------------------------------------------------
+# One short line: the main point comes first (it is what shows in the phone
+# notification), then a short timing hint. Parts are mixed randomly.
+HOOKS = [
+    "کانفیگ‌های سریع و پرسرعت رسیدن، آماده‌اید؟ ⚡️",
+    "یه دسته کانفیگ تست‌شده با سرعت بالا آماده‌ست 🚀",
+    "سرعت‌های بالا داره میاد، آماده‌اید؟ 🔥",
+    "کانفیگ‌های فوق‌سریع جدید آماده شدن 🏎",
+    "کانفیگ‌هایی که سرعتشون حرف نداره آماده‌ست 💥",
+    "سرعت اینترنتتون رو بالا ببرید، کانفیگ‌های سریع میان ⚡️",
+    "کانفیگ‌های تند و تیز با پینگ پایین رسیدن 😍",
+    "جدیدترین کانفیگ‌های پرسرعت تست شدن و عالی بودن 😉",
+    "آماده‌اید برای اینترنت سریع و بی‌وقفه؟ 🤩",
+    "کانفیگ‌های پرسرعت و کم‌پینگ آماده‌ی انتشارن 📡",
 ]
 
 TIMINGS = [
-    "تا {m} دقیقه‌ی دیگه می‌ذارمشون ⏳",
-    "{m} دقیقه‌ی دیگه همین‌جان، جایی نرید! 👇",
-    "چند دقیقه‌ی دیگه منتشر می‌شن، آماده باشید ⏰",
-    "تا چند دقیقه‌ی دیگه توی کانال می‌بینیدشون 📡",
-    "گوشی دستتون باشه، {m} دقیقه‌ی دیگه شروع می‌کنیم 📱",
-    "یه کم صبر کنید، {m} دقیقه‌ی دیگه می‌رسن ⌛️",
+    "{m} دقیقه‌ی دیگه اینجاست ⏳",
+    "تا {m} دقیقه‌ی دیگه 👇",
+    "جایی نرید، {m} دقیقه‌ی دیگه ⏰",
+    "چند دقیقه‌ی دیگه منتشر می‌شن 📣",
+    "{m} دقیقه‌ی دیگه توی کانال 📺",
+    "گوشی دستتون، {m} دقیقه‌ی دیگه 📱",
+    "فقط {m} دقیقه صبر کنید ⌛️",
+    "{m} دقیقه‌ی دیگه شروع می‌کنیم 🚦",
 ]
 
 
@@ -56,17 +51,14 @@ def fa_digits(value):
 
 
 def build_teaser(minutes, last):
-    """Random mix of opener + question + timing. The question and the timing
-    line always differ from the previous teaser."""
+    """Single-line teaser: hook + timing. Both differ from the previous one."""
     m = fa_digits(int(round(minutes)))
     for _ in range(30):
-        opener = random.choice(OPENERS) if random.random() < 0.75 else ""
-        question = random.choice(QUESTIONS)
+        hook = random.choice(HOOKS)
         timing = random.choice(TIMINGS)
-        if question != last.get("question") and timing != last.get("timing"):
+        if hook != last.get("hook") and timing != last.get("timing"):
             break
-    text = "\n\n".join(p for p in (opener, question, timing.format(m=m)) if p)
-    return text, {"question": question, "timing": timing}
+    return f"{hook} {timing.format(m=m)}", {"hook": hook, "timing": timing}
 
 
 def send_teaser(text):
