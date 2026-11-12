@@ -8,14 +8,19 @@ import requests
 from common import config_id, load_json, prune, save_json, state_path
 
 SOURCES = [
-    {"name": "mehrtat-vless-collector", "tag": "ME", "urls": [
-        "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt"]},
-    {"name": "Bllare-V2ray-Configs", "tag": "BL", "urls": [
-        "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt"]},
     # "ordered": the file is already ranked (fastest first), so it is not shuffled.
     {"name": "0xRadikal-Free-v2ray-Configs", "tag": "RK", "ordered": True, "urls": [
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/top100.txt",
         "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt"]},
+]
+
+# Fallback sources: NOT used while the primary SOURCES above produce passing
+# configs. They are tried only in a run where no primary config passed the test.
+FALLBACK_SOURCES = [
+    {"name": "mehrtat-vless-collector", "tag": "ME", "urls": [
+        "https://raw.githubusercontent.com/mehrtat/vless-collector/main/vless.txt"]},
+    {"name": "Bllare-V2ray-Configs", "tag": "BL", "urls": [
+        "https://raw.githubusercontent.com/Bllare/V2ray-Configs/main/ALL.txt"]},
     {"name": "MatinGhanbari-v2ray-configs", "tag": "MG", "urls": [
         f"https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/subs/sub{i}.txt"
         for i in range(1, 40)]},
@@ -430,23 +435,17 @@ def interleave(selected):
             if i < len(items): ordered.append((items[i], tag))
     return ordered
 
-def main():
-    print(f"Jet Config Tester | target Xray {XRAY_VERSION} | workers {WORKERS}")
-    now = time.time()
-    failed = prune(load_json(FAILED_FILE, {}), RETEST_FAILED_HOURS * 3600, now)
-    stats = load_json(STATS_FILE, {})
-    for ip, entry in load_json(GEO_FILE, {}).items():
-        if isinstance(entry, dict) and now - entry.get("ts", 0) < GEO_TTL_SECONDS:
-            GEO_CACHE[ip] = entry
-
-    items_by_tag, name_by_tag = {}, {}
-    for source in SOURCES:
+def run_stage(name, sources, failed, stats, now):
+    """Fetch -> quota -> TCP check -> full/stability test for one group of sources.
+    `failed` and `stats` are updated in place."""
+    print(f"=== Stage: {name} ===")
+    items_by_tag = {}
+    for source in sources:
         items = fetch_source(source)
         fresh = [u for u in items if config_id(u) not in failed]
         if not source.get("ordered"):
             random.shuffle(fresh)       # a different slice of the pool every run
         items_by_tag[source["tag"]] = fresh
-        name_by_tag[source["tag"]] = source["name"]
         print(f"Source total {source['name']}: {len(items)} unique, {len(fresh)} not recently failed")
 
     alloc = allocate(items_by_tag, MAX_CANDIDATES, stats)
@@ -498,23 +497,45 @@ def main():
         failed[config_id(uri)] = now
         tested_by_tag[tag] = tested_by_tag.get(tag, 0) + 1
 
+    for tag in items_by_tag:
+        old = stats.get(tag, {"tested": 0.0, "passed": 0.0})
+        stats[tag] = {"tested": old["tested"] * SOURCE_STATS_DECAY + tested_by_tag.get(tag, 0),
+                      "passed": old["passed"] * SOURCE_STATS_DECAY + passed_by_tag.get(tag, 0)}
+
+    print("Source pass rates: " + ", ".join(
+        f"{t}={passed_by_tag.get(t, 0)}/{tested_by_tag.get(t, 0)}" for t in items_by_tag))
+    return {"passed": passed, "tested": len(to_test), "tcp_dead": len(tcp_dead)}
+
+def main():
+    print(f"Jet Config Tester | target Xray {XRAY_VERSION} | workers {WORKERS}")
+    now = time.time()
+    failed = prune(load_json(FAILED_FILE, {}), RETEST_FAILED_HOURS * 3600, now)
+    stats = load_json(STATS_FILE, {})
+    for ip, entry in load_json(GEO_FILE, {}).items():
+        if isinstance(entry, dict) and now - entry.get("ts", 0) < GEO_TTL_SECONDS:
+            GEO_CACHE[ip] = entry
+
+    stage = run_stage("primary", SOURCES, failed, stats, now)
+    passed, tested, tcp_dead = stage["passed"], stage["tested"], stage["tcp_dead"]
+
+    # Fallback sources only when nothing from the primary sources passed.
+    if not passed and FALLBACK_SOURCES:
+        print("No config from the primary sources passed -> trying the fallback sources.")
+        fallback = run_stage("fallback", FALLBACK_SOURCES, failed, stats, now)
+        passed += fallback["passed"]
+        tested += fallback["tested"]
+        tcp_dead += fallback["tcp_dead"]
+
     # Persist results and state.
     with open(RESULT_FILE, "w", encoding="utf-8") as f:
         json.dump(passed, f, ensure_ascii=False, indent=2)
     try: os.chmod(RESULT_FILE, 0o600)
     except OSError: pass
-
-    for tag in items_by_tag:
-        old = stats.get(tag, {"tested": 0.0, "passed": 0.0})
-        stats[tag] = {"tested": old["tested"] * SOURCE_STATS_DECAY + tested_by_tag.get(tag, 0),
-                      "passed": old["passed"] * SOURCE_STATS_DECAY + passed_by_tag.get(tag, 0)}
     save_json(FAILED_FILE, failed)
     save_json(STATS_FILE, stats)
     save_json(GEO_FILE, GEO_CACHE)
 
-    print("Source pass rates: " + ", ".join(
-        f"{t}={passed_by_tag.get(t, 0)}/{tested_by_tag.get(t, 0)}" for t in items_by_tag))
-    print(f"Total full-tested: {len(to_test)} | TCP-dead: {len(tcp_dead)} | Passed (all {1 + STABILITY_ROUNDS} rounds): {len(passed)}")
+    print(f"Total full-tested: {tested} | TCP-dead: {tcp_dead} | Passed (all {1 + STABILITY_ROUNDS} rounds): {len(passed)}")
     print("Supported tested protocols: VLESS, VMess, Trojan, Shadowsocks. SSR/TUIC/Hysteria2 and unsupported transports are skipped.")
 
 if __name__ == "__main__": main()
