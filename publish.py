@@ -1,9 +1,15 @@
 import os
 import json
 import sys
+import time
 import requests
 
+from common import config_id, load_json, prune, save_json, state_path
+
 RESULT_FILE = "passed_configs.json"
+SENT_FILE = state_path("sent.json")
+# A config that was already published is not sent again for this many hours.
+SENT_TTL_HOURS = float(os.environ.get("SENT_TTL_HOURS", "8"))
 
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 APPS_SCRIPT_SECRET = os.environ.get("APPS_SCRIPT_SECRET")
@@ -32,9 +38,28 @@ def main():
         print("No configurations passed the tests. Nothing to publish.")
         return
 
+    # Skip configs that were already published recently.
+    now = time.time()
+    sent = prune(load_json(SENT_FILE, {}), SENT_TTL_HOURS * 3600, now)
+    new_configs, new_ids = [], set()
+    for config in configs:
+        cid = config_id(config)
+        if cid in sent or cid in new_ids:
+            continue
+        new_ids.add(cid)
+        new_configs.append(config)
+
+    print(f"Passed: {len(configs)} | already published recently: "
+          f"{len(configs) - len(new_configs)} | new: {len(new_configs)}")
+
+    if not new_configs:
+        save_json(SENT_FILE, sent)   # keep the pruned history
+        print("No new configurations to publish.")
+        return
+
     payload = {
         "secret": APPS_SCRIPT_SECRET,
-        "configs": configs
+        "configs": new_configs
     }
 
     try:
@@ -57,6 +82,12 @@ def main():
             print("ERROR: Apps Script rejected the request.")
             print(result.get("error", "Unknown error"))
             sys.exit(1)
+
+        # Only after a confirmed success are the configs marked as published,
+        # so a failed request is retried automatically on the next run.
+        for config in new_configs:
+            sent[config_id(config)] = now
+        save_json(SENT_FILE, sent)
 
         print("Publication request completed.")
         print("Passing configurations:", result.get("received", 0))
