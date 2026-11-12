@@ -3,7 +3,8 @@ name: Jet Config Tester
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'
+    # every hour, on the hour
+    - cron: '0 * * * *'
 
 permissions:
   contents: read
@@ -15,7 +16,7 @@ concurrency:
 jobs:
   test-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,6 +51,8 @@ jobs:
         env:
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           APPS_SCRIPT_SECRET: ${{ secrets.APPS_SCRIPT_SECRET }}
+          SENT_TTL_HOURS: '10'
+          TEASER_DELAY_MINUTES: '5'
         run: python publish.py
       - name: Save state
         if: always()
