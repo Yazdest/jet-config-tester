@@ -1,0 +1,5 @@
+passed_configs.json
+state/
+bin/
+xray.zip
+pycache/
